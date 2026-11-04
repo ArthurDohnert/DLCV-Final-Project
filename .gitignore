@@ -1,0 +1,21 @@
+# Dados do DFC2019: os termos de uso proíbem redistribuir. Nunca versionar.
+data/
+*.zip
+*.tif
+*.tiff
+*.npy
+*.npz
+
+# Saídas de treino
+checkpoints/
+runs/
+logs/
+outputs/
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
