@@ -1,0 +1,15 @@
+# Versões fixadas, iguais no notebook (Windows) e no PCAD (Linux). Python 3.11.9.
+# PyTorch é instalado à parte pelos scripts de setup:
+#   torch==2.5.1 torchvision==0.20.1 (CUDA 12.1, índice download.pytorch.org/whl/cu121)
+numpy==1.26.4
+segmentation-models-pytorch==0.3.4
+timm==0.9.7
+tifffile==2024.8.30
+imagecodecs==2024.9.22
+matplotlib==3.9.2
+opencv-python-headless==4.10.0.84
+albumentations==1.4.18
+tqdm==4.66.5
+tensorboard==2.18.0
+pyyaml==6.0.2
+pillow==10.4.0

@@ -5,10 +5,23 @@ Ao final: ambiente funcionando no PCAD, GPU testada, Track 2 baixada direto no P
 ## Decisões que economizam 150 GB
 
 - **Não baixe nenhum arquivo "Multispectral images".** Usamos só RGB. Isso corta ~125 GB.
-- **Não baixe a Track 1.** A Track 2 (Reference) já traz `LEFT_AGL` (altura acima do solo) para a imagem esquerda de cada par. Então o Caminho A treina com `LEFT_RGB -> LEFT_AGL` e o Caminho B com `LEFT_RGB + RIGHT_RGB -> LEFT_DSP`, **nas mesmas imagens**. A comparação A x B fica perfeita.
+- **Não baixe a Track 1.** Os zips de RGB da Track 2 já trazem `LEFT_AGL` (altura acima do solo) para a imagem esquerda de cada par; o zip Reference traz as disparidades (`LEFT_DSP`). Então o Caminho A treina com `LEFT_RGB -> LEFT_AGL` e o Caminho B com `LEFT_RGB + RIGHT_RGB -> LEFT_DSP`, **nas mesmas imagens**. A comparação A x B fica perfeita.
 - **Não baixe "Validation data".** Ela não tem verdade de solo (o gabarito ficou com a organização do concurso). Nosso val/teste sai dos tiles de treino, separados por tile.
 - Total: ~33 GB (Track 2 RGB 1/4 a 4/4 + Track 2 Reference). Para começar hoje, só ~5 GB.
 - Fatos do código oficial (`pubgeo/dfc2019`): disparidade **pode ser negativa**, pixels sem verdade valem **-999**.
+
+## Rodando no notebook (enquanto o PCAD está fora do ar)
+
+Com `Train-Track2-Truth.zip` e `Train-Track2-RGB-2.zip` na raiz do projeto, no PowerShell:
+
+```powershell
+cd C:\dev\DLCV-Final-Project
+powershell -ExecutionPolicy Bypass -File scripts\local\setup_venv.ps1   # cria .venv (Python 3.11.9 + PyTorch CUDA)
+.venv\Scripts\python scripts\local\extract_data.py                     # extrai só o necessário para data\dfc2019\track2
+.venv\Scripts\python src\data\inspect_track2.py --data data\dfc2019\track2
+```
+
+Resultado da primeira inspeção (RGB 2/4, 4/11/2026): 454 pares, todos de Jacksonville, em 9 tiles; imagens 1024×1024; disparidade inteira, de −75 a 128 px (99,8% entre −28 e 30); 20% dos pixels sem verdade (−999); altura de 0 a 209 m (99,9% abaixo de 29 m).
 
 ## Quem faz o quê
 

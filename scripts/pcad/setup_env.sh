@@ -14,9 +14,9 @@ fi
 conda activate sat3d
 # PyTorch com CUDA 12.1 (funciona na RTX 4090 da tupi e na 4070 da poti)
 pip install --upgrade pip
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-pip install -r "$REPO_DIR/environment.txt"
+pip install -r "$REPO_DIR/requirements.txt"
 # baixa os pesos ImageNet já agora (caso os nós de computação não tenham internet)
 python -c "import segmentation_models_pytorch as smp; smp.Unet('resnet34', encoder_weights='imagenet'); smp.Unet('efficientnet-b4', encoder_weights='imagenet'); print('pesos ImageNet em cache')"
 python -c "import torch, segmentation_models_pytorch, tifffile; print('OK torch', torch.__version__)"

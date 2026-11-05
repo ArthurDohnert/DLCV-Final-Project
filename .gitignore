@@ -1,5 +1,5 @@
 # Dados do DFC2019: os termos de uso proíbem redistribuir. Nunca versionar.
-data/
+/data/
 *.zip
 *.tif
 *.tiff
@@ -7,10 +7,10 @@ data/
 *.npz
 
 # Saídas de treino
-checkpoints/
-runs/
-logs/
-outputs/
+/checkpoints/
+/runs/
+/logs/
+/outputs/
 *.pt
 *.pth
 
@@ -19,3 +19,7 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .venv/
+
+# venvs e temporários
+venv/
+*.tmp
