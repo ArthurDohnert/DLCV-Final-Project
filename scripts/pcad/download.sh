@@ -9,7 +9,7 @@ mkdir -p "$DEST" "$HOME/data/dfc2019/logs"
 cd "$DEST"
 wget -c --tries=20 --waitretry=10 --timeout=60 -O "$NAME" "$URL"
 STATUS=$?
-if [ $STATUS -eq 0 ] && unzip -tq "$NAME" >/dev/null 2>&1; then
+if [ $STATUS -eq 0 ] && python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1])" "$NAME" 2>/dev/null; then
   echo "OK: $NAME baixado e íntegro ($(du -h "$NAME" | cut -f1))"
 else
   echo "FALHOU ($STATUS): $NAME. Se o erro foi 403, o link expirou: copie um novo e rode de novo (o -c continua de onde parou)."
