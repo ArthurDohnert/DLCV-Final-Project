@@ -64,3 +64,53 @@ class Track2Height(Dataset):
         return (torch.from_numpy(np.ascontiguousarray(img.transpose(2, 0, 1))),
                 torch.from_numpy(np.ascontiguousarray(agl[None])),
                 torch.from_numpy(np.ascontiguousarray(mask[None])))
+
+
+class Track2Stereo(Dataset):
+    """Caminho B. Retorna (esquerda, direita, disparidade, máscara da disparidade, altura, máscara da altura).
+
+    Os pares já vêm retificados (linhas epipolares horizontais). Por isso o único
+    aumento geométrico permitido é o espelhamento vertical aplicado às duas imagens:
+    girar ou espelhar na horizontal quebraria a geometria do par.
+    crop é (altura, largura) ou None para a imagem inteira.
+    """
+
+    def __init__(self, data_dir, pairs, crop=(256, 512), train=True, augment=True):
+        self.data_dir = Path(data_dir)
+        self.pairs = list(pairs)
+        self.crop = crop
+        self.train = train
+        self.augment = augment and train
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, i):
+        b = self.pairs[i]
+        left = tifffile.imread(self.data_dir / f"{b}LEFT_RGB.tif")[..., :3]
+        right = tifffile.imread(self.data_dir / f"{b}RIGHT_RGB.tif")[..., :3]
+        disp = tifffile.imread(self.data_dir / f"{b}LEFT_DSP.tif").astype(np.float32)
+        agl = tifffile.imread(self.data_dir / f"{b}LEFT_AGL.tif").astype(np.float32)
+        h, w = disp.shape
+        if self.crop:
+            ch, cw = min(self.crop[0], h), min(self.crop[1], w)
+            if self.train:
+                y, x = np.random.randint(0, h - ch + 1), np.random.randint(0, w - cw + 1)
+            else:
+                y, x = (h - ch) // 2, (w - cw) // 2
+            sl = (slice(y, y + ch), slice(x, x + cw))
+            left, right, disp, agl = left[sl], right[sl], disp[sl], agl[sl]
+        if self.augment and np.random.rand() < 0.5:
+            left, right, disp, agl = left[::-1], right[::-1], disp[::-1], agl[::-1]
+        dmask, amask = valid_mask(disp), valid_mask(agl)
+        disp = np.where(dmask, disp, 0.0).astype(np.float32)
+        agl = np.where(amask, agl, 0.0).astype(np.float32)
+
+        def norm(im):
+            im = (im.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
+            return torch.from_numpy(np.ascontiguousarray(im.transpose(2, 0, 1)))
+
+        def t(a):
+            return torch.from_numpy(np.ascontiguousarray(a[None]))
+
+        return norm(left), norm(right), t(disp), t(dmask), t(agl), t(amask)

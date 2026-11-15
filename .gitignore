@@ -23,3 +23,6 @@ __pycache__/
 # venvs e temporários
 venv/
 *.tmp
+
+# visualizador: data.js contém imagem derivada do DFC2019 (não redistribuir)
+viewer/data.js

@@ -11,6 +11,7 @@ Checkpoints e logs em runs/<name>/. Rodar de novo com o mesmo --name continua de
 import argparse
 import json
 import math
+import os
 import random
 import signal
 import time
@@ -18,7 +19,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -84,6 +84,8 @@ def save_figure(model, ds, device, amp, path, k=3):
 
 
 def main():
+    # No Windows, cada worker do DataLoader reimporta este módulo. Por isso nada pesado
+    # (como o segmentation_models_pytorch) é importado no topo do arquivo.
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data/dfc2019/track2")
     ap.add_argument("--splits", default="outputs/inspect/splits.json")
@@ -121,7 +123,8 @@ def main():
         val_ds = Track2Height(args.data, load_split(args.splits, "val"), crop=None, train=False)
     train_dl = DataLoader(train_ds, batch_size=args.batch, shuffle=True, num_workers=args.workers,
                           pin_memory=amp, drop_last=len(train_ds) > args.batch, persistent_workers=args.workers > 0)
-    val_dl = DataLoader(val_ds, batch_size=1 if not args.overfit else args.batch, num_workers=args.workers)
+    val_workers = 0 if os.name == "nt" else args.workers  # Windows: poupa RAM; são só ~70 imagens
+    val_dl = DataLoader(val_ds, batch_size=1 if not args.overfit else args.batch, num_workers=val_workers)
 
     # baseline bobo: altura média do conjunto de treino
     s = c = 0.0
@@ -131,6 +134,7 @@ def main():
     baseline = s / max(c, 1)
     print(f"Dispositivo: {device} | treino {len(train_ds)} pares, val {len(val_ds)} | baseline (média) {baseline:.2f} m")
 
+    import segmentation_models_pytorch as smp  # aqui, e não no topo: ver comentário no topo do main
     model = smp.Unet(args.encoder, encoder_weights=None if args.no_pretrained else "imagenet",
                      in_channels=3, classes=1).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)

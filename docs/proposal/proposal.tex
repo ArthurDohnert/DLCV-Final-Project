@@ -1,0 +1,81 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{enumitem}
+\usepackage{array}
+
+\title{Final Project Proposal\\[0.3em]
+\large From Orbit to 3D: Single-View vs.\ Stereo Deep Learning\\for Satellite Terrain Reconstruction}
+\author{Arthur Dohnert\\
+\small INF01081 / CMP620 -- Deep Learning for Visual Computing, UFRGS, 2026/2}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent\textbf{Group:} individual project (no partner).\\
+\textbf{Option:} 1st and only option, a topic outside the suggested list.
+
+\section*{Description}
+
+Build a 3D model of a city (buildings, trees and streets) using only satellite images.
+Two deep learning approaches will be compared on the same places:
+\begin{itemize}
+  \item \textbf{Path A:} estimate the height of every pixel from a \emph{single} image (U-Net with a pretrained encoder).
+  \item \textbf{Path B:} estimate the height from \emph{two} images of the same place taken from different angles (stereo network, PSMNet).
+\end{itemize}
+The reconstructed terrain will be shown in an interactive 3D viewer, similar to the 3D mode of Google Earth, and used to plan the route of a rover, as is done for Mars rovers using orbital images.
+
+\section*{Goals}
+
+\begin{enumerate}
+  \item Measure how much the second image improves the reconstruction (height error in meters).
+  \item Find out in which cases stereo helps and in which a single image is enough.
+  \item Build a 3D viewer of the reconstructed terrain, to be used as the live demo.
+  \item Plan a rover route on the reconstructed terrain and check it against the real terrain.
+\end{enumerate}
+
+\section*{Resources}
+
+\begin{itemize}
+  \item \textbf{Data:} IEEE GRSS Data Fusion Contest 2019 (US3D), Track 2: about 4{,}300 stereo pairs of satellite images of Jacksonville and Omaha, with LiDAR height as ground truth.
+  \item \textbf{Compute:} PCAD cluster (INF/UFRGS, RTX 4090 nodes) for training; laptop GPU (RTX 3050) for tests.
+  \item \textbf{Tools:} Python, PyTorch, segmentation-models-pytorch, three.js (viewer).
+\end{itemize}
+
+\section*{Steps}
+
+\begin{enumerate}
+  \item Download and inspect the dataset; split train, validation and test by location. \emph{(done)}
+  \item Run Path A and Path B end to end on a small part of the data, with a fair evaluation script. \emph{(done)}
+  \item Train Path A and Path B on the full dataset on PCAD.
+  \item Improve Path B with a pretrained stereo network (RAFT-Stereo) and add a classical stereo baseline (SGM).
+  \item Compare A and B on the test set and analyze when each one works better.
+  \item Finish the 3D viewer and the rover route planning.
+  \item Prepare the slides and the live demo.
+  \item Final presentation.
+\end{enumerate}
+
+\section*{Timetable}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{|l|c|c|c|c|c|c|}
+\hline
+Step & Nov 3--9 & Nov 10--16 & Nov 17--23 & Nov 24--30 & Dec 1--6 & Dec 7 \\
+\hline
+1. Dataset          & x &   &   &   &   &   \\ \hline
+2. First pipelines  & x &   &   &   &   &   \\ \hline
+3. Full training    &   & x &   &   &   &   \\ \hline
+4. Improve Path B   &   &   & x &   &   &   \\ \hline
+5. Comparison       &   &   & x & x &   &   \\ \hline
+6. Viewer and rover &   &   &   & x &   &   \\ \hline
+7. Slides and demo  &   &   &   &   & x &   \\ \hline
+8. Presentation     &   &   &   &   &   & x \\ \hline
+\end{tabular}
+\end{center}
+
+\noindent Experiments end on November 30. The last week is only for the slides and the demo.
+
+\end{document}
