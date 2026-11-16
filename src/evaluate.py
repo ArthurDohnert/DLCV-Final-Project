@@ -47,6 +47,24 @@ def fit_line(x, y):
     return a, y.mean() - a * x.mean()
 
 
+GEOMETRIAS = [(0, 1, "< 1 m/px (boa)"), (1, 2, "1-2 m/px"), (2, 1e9, "> 2 m/px (ruim)")]
+
+
+def combine(h_a, h_b, m_por_px):
+    """Combinações de A e B, com regras fixadas antes de ver os resultados.
+
+    media:      (A + B) / 2
+    relevo:     no chão usa A, no que é alto usa B. Peso de B = 0 quando max(A, B) < 1 m,
+                1 quando > 3 m, e cresce linearmente entre 1 e 3 m.
+    relevo_geo: como relevo, mas usa só A quando a geometria do par é ruim (>= 2 m por pixel
+                de disparidade); na prática essa geometria vem dos ângulos nos metadados.
+    """
+    w = np.clip((np.maximum(h_a, h_b) - 1.0) / 2.0, 0.0, 1.0)
+    relevo = (1 - w) * h_a + w * h_b
+    return {"AB_media": 0.5 * (h_a + h_b), "AB_relevo": relevo,
+            "AB_relevo_geo": h_a if m_por_px >= 2 else relevo}
+
+
 class Acc:
     def __init__(self):
         self.abs = self.sq = self.ok1 = self.n = 0.0
@@ -96,7 +114,9 @@ def main():
         _, _, _, _, a_, m_ = tr[j]
         tot += a_[m_].sum().item(); cnt += m_.sum().item()
     mean_agl = tot / max(cnt, 1)
-    acc = {k: Acc() for k in ["media", "A", "A_ajuste", "B"]}
+    metodos = ["media", "A", "A_ajuste", "B", "AB_media", "AB_relevo", "AB_relevo_geo"]
+    acc = {k: Acc() for k in metodos}
+    acc_geo = {nome: {k: Acc() for k in metodos} for _, _, nome in GEOMETRIAS}
     epe = d1 = nd = 0.0
     rows = []
     with torch.no_grad():
@@ -116,17 +136,23 @@ def main():
             h_b = cal[0] * d_b + cal[1]
             h_a2 = fa[0] * h_a + fa[1]
             gt = agl[m]
-            row = {"par": pairs[i]}
-            for k, pred in [("media", np.full_like(gt, mean_agl)), ("A", h_a[m]), ("A_ajuste", h_a2[m]), ("B", h_b[m])]:
+            m_px = float(abs(cal[0]))
+            geo = next(nome for lo, hi, nome in GEOMETRIAS if lo <= m_px < hi)
+            comb = combine(h_a, h_b, m_px)
+            preds = {"media": np.full_like(gt, mean_agl), "A": h_a[m], "A_ajuste": h_a2[m], "B": h_b[m]}
+            preds.update({k: v[m] for k, v in comb.items()})
+            row = {"par": pairs[i], "geometria": geo}
+            for k, pred in preds.items():
                 err = pred - gt
-                acc[k].add(err)
+                acc[k].add(err); acc_geo[geo][k].add(err)
                 row[f"{k}_rmse"] = float(np.sqrt((err ** 2).mean()))
             e = np.abs(d_b[m] - disp[m]); epe += e.sum(); d1 += (e > 3).sum(); nd += e.size
-            row["B_epe_px"] = float(e.mean()); row["m_por_px"] = float(abs(cal[0]))
+            row["B_epe_px"] = float(e.mean()); row["m_por_px"] = m_px
             rows.append(row)
             if i < args.save_preds:
                 np.savez_compressed(out / "preds" / f"{pairs[i]}.npz", gt=np.where(amask[0].numpy(), agl, np.nan).astype(np.float16),
-                                    a=h_a.astype(np.float16), b=h_b.astype(np.float16), mask=m)
+                                    a=h_a.astype(np.float16), b=h_b.astype(np.float16),
+                                    ab=comb["AB_relevo_geo"].astype(np.float16), mask=m)
             print(f"{i + 1}/{len(ds)} {pairs[i]} | RMSE A {row['A_rmse']:.2f} m, B {row['B_rmse']:.2f} m", flush=True)
 
     res = {k: v.result() for k, v in acc.items()}
@@ -139,7 +165,8 @@ def main():
 
     print("\nResultado no split", args.split, f"({len(rows)} pares, mesmos pixels para todos):")
     names = {"media": "Baseline (altura média)", "A": "A: 1 imagem (U-Net)", "A_ajuste": "A + ajuste por par",
-             "B": "B: 2 imagens (PSMNet)"}
+             "B": "B: 2 imagens (PSMNet)", "AB_media": "A+B: média",
+             "AB_relevo": "A+B: por relevo", "AB_relevo_geo": "A+B: relevo + geometria"}
     print(f"{'método':28s} {'MAE (m)':>8s} {'RMSE (m)':>9s} {'erro<1m':>8s}")
     for k, name in names.items():
         r = res[k]; print(f"{name:28s} {r['mae_m']:8.2f} {r['rmse_m']:9.2f} {r['erro_menor_1m']:8.1%}")
@@ -147,16 +174,20 @@ def main():
 
     # Geometria do par: quantos metros de altura cada pixel de disparidade representa.
     # Par com ângulo pequeno entre as duas vistas = muitos metros por pixel = estéreo pouco preciso.
-    print("\nPor geometria do par (média dos RMSE por par):")
+    print("\nPor geometria do par (por pixel; 'vence A' = pares em que o método erra menos que A):")
     res["por_geometria"] = {}
-    for lo, hi, nome in [(0, 1, "< 1 m/px (boa)"), (1, 2, "1-2 m/px"), (2, 1e9, "> 2 m/px (ruim)")]:
-        sel = [r for r in rows if lo <= r["m_por_px"] < hi]
+    for _, _, nome in GEOMETRIAS:
+        sel = [r for r in rows if r["geometria"] == nome]
         if not sel:
             continue
-        ra = float(np.mean([r["A_rmse"] for r in sel])); rb = float(np.mean([r["B_rmse"] for r in sel]))
-        vence = sum(r["B_rmse"] < r["A_rmse"] for r in sel)
-        res["por_geometria"][nome] = {"pares": len(sel), "A_rmse": ra, "B_rmse": rb, "B_vence": vence}
-        print(f"  {nome:16s} {len(sel):3d} pares | A {ra:.2f} m | B {rb:.2f} m | B vence em {vence}")
+        res["por_geometria"][nome] = {"pares": len(sel)}
+        print(f"  {nome} ({len(sel)} pares)")
+        for k in ["A", "B", "AB_media", "AB_relevo", "AB_relevo_geo"]:
+            r = acc_geo[nome][k].result()
+            vence = sum(x[f"{k}_rmse"] < x["A_rmse"] for x in sel)
+            res["por_geometria"][nome][k] = dict(r, vence_A=vence)
+            extra = "" if k == "A" else f" | vence A em {vence}"
+            print(f"    {names[k]:26s} MAE {r['mae_m']:5.2f} | RMSE {r['rmse_m']:5.2f} | erro<1m {r['erro_menor_1m']:6.1%}{extra}")
     (out / "metrics.json").write_text(json.dumps(res, indent=1))
 
     save_figure(out, pairs[: args.save_preds], ds)
