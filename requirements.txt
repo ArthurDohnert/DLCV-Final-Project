@@ -13,3 +13,4 @@ tqdm==4.66.5
 tensorboard==2.18.0
 pyyaml==6.0.2
 pillow==10.4.0
+opt_einsum==3.4.0

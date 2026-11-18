@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.data.dataset import Track2Stereo, load_split
+from src.data.dataset import IMAGENET_MEAN, IMAGENET_STD, Track2Stereo, load_split
 
 
 def predict_disp(model, left, right, amp, strip=256, overlap=32):
@@ -81,7 +81,9 @@ class Acc:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--height", required=True, help="checkpoint do Caminho A (best.pt)")
-    ap.add_argument("--stereo", required=True, help="checkpoint do Caminho B (best.pt)")
+    ap.add_argument("--stereo", required=True,
+                    help="Caminho B: best.pt da PSMNet ou da RAFT-Stereo, ou pesos .pth da RAFT-Stereo sem ajuste")
+    ap.add_argument("--raft-dir", default=None, help="repositório oficial da RAFT-Stereo (padrão: third_party/RAFT-Stereo)")
     ap.add_argument("--data", default="data/dfc2019/track2")
     ap.add_argument("--splits", default="outputs/inspect/splits.json")
     ap.add_argument("--split", default="val")
@@ -100,10 +102,26 @@ def main():
     model_a = smp.Unet(ck_a["args"]["encoder"], encoder_weights=None, in_channels=3, classes=1).to(device)
     model_a.load_state_dict(ck_a["model"]); model_a.eval()
     ck_b = torch.load(args.stereo, map_location=device, weights_only=False)
-    min_d, max_d = ck_b["args"]["min_disp"], ck_b["args"]["max_disp"]
-    model_b = PSMNetBasic(max_d, min_d).to(device)
-    model_b.load_state_dict(ck_b["model"]); model_b.eval()
-    print(f"A: {args.height} (época {ck_a['epoch']}) | B: {args.stereo} (época {ck_b['epoch']})")
+    is_raft = "model" not in ck_b or ck_b.get("args", {}).get("model") == "raft"
+    if is_raft:
+        from src.models.raft import RaftDisparity
+        iters = ck_b.get("args", {}).get("valid_iters", 32)   # mesmas iterações usadas na validação do treino
+        model_b = RaftDisparity(args.raft_dir, mixed_precision=amp, valid_iters=iters).to(device)
+        if "model" in ck_b:
+            model_b.load_state_dict(ck_b["model"])
+        else:
+            model_b.load_pretrained(args.stereo)   # pesos oficiais, sem ajuste ao US3D
+        min_d, max_d = -64, 128                     # mesmos pixels avaliados na PSMNet
+        b_name, epoca_b = "B: 2 imagens (RAFT-Stereo)", ck_b.get("epoch", "sem ajuste")
+    else:
+        min_d, max_d = ck_b["args"]["min_disp"], ck_b["args"]["max_disp"]
+        model_b = PSMNetBasic(max_d, min_d).to(device)
+        model_b.load_state_dict(ck_b["model"])
+        b_name, epoca_b = "B: 2 imagens (PSMNet)", ck_b["epoch"]
+    model_b.eval()
+    print(f"A: {args.height} (época {ck_a['epoch']}) | B: {args.stereo} (época {epoca_b})")
+    mean_t = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
+    std_t = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
 
     pairs = load_split(args.splits, args.split)
     ds = Track2Stereo(args.data, pairs, crop=None, train=False, augment=False)
@@ -128,7 +146,12 @@ def main():
                 continue
             with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
                 h_a = model_a(left[None].to(device)).float()[0, 0].cpu().numpy()
-            d_b = predict_disp(model_b, left[None].to(device), right[None].to(device), amp).numpy()
+            if is_raft:  # a RAFT-Stereo recebe as imagens em 0-255 e processa a imagem inteira de uma vez
+                raw_l = ((left[None] * std_t + mean_t) * 255).to(device)
+                raw_r = ((right[None] * std_t + mean_t) * 255).to(device)
+                d_b = model_b(raw_l, raw_r).float()[0, 0].cpu().numpy()
+            else:
+                d_b = predict_disp(model_b, left[None].to(device), right[None].to(device), amp).numpy()
             cal = fit_line(disp[m], agl[m])          # geometria do par (verdade disp -> altura)
             fa = fit_line(h_a[m], agl[m])            # benefício extra dado a A
             if cal is None or fa is None:
@@ -165,7 +188,7 @@ def main():
 
     print("\nResultado no split", args.split, f"({len(rows)} pares, mesmos pixels para todos):")
     names = {"media": "Baseline (altura média)", "A": "A: 1 imagem (U-Net)", "A_ajuste": "A + ajuste por par",
-             "B": "B: 2 imagens (PSMNet)", "AB_media": "A+B: média",
+             "B": b_name, "AB_media": "A+B: média",
              "AB_relevo": "A+B: por relevo", "AB_relevo_geo": "A+B: relevo + geometria"}
     print(f"{'método':28s} {'MAE (m)':>8s} {'RMSE (m)':>9s} {'erro<1m':>8s}")
     for k, name in names.items():

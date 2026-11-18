@@ -73,14 +73,16 @@ class Track2Stereo(Dataset):
     aumento geométrico permitido é o espelhamento vertical aplicado às duas imagens:
     girar ou espelhar na horizontal quebraria a geometria do par.
     crop é (altura, largura) ou None para a imagem inteira.
+    normalize=False entrega as imagens em 0-255 (o que a RAFT-Stereo espera).
     """
 
-    def __init__(self, data_dir, pairs, crop=(256, 512), train=True, augment=True):
+    def __init__(self, data_dir, pairs, crop=(256, 512), train=True, augment=True, normalize=True):
         self.data_dir = Path(data_dir)
         self.pairs = list(pairs)
         self.crop = crop
         self.train = train
         self.augment = augment and train
+        self.normalize = normalize
 
     def __len__(self):
         return len(self.pairs)
@@ -107,7 +109,9 @@ class Track2Stereo(Dataset):
         agl = np.where(amask, agl, 0.0).astype(np.float32)
 
         def norm(im):
-            im = (im.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
+            im = im.astype(np.float32)
+            if self.normalize:
+                im = (im / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
             return torch.from_numpy(np.ascontiguousarray(im.transpose(2, 0, 1)))
 
         def t(a):

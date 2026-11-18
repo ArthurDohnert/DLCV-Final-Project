@@ -26,3 +26,6 @@ venv/
 
 # visualizador: data.js contém imagem derivada do DFC2019 (não redistribuir)
 viewer/data.js
+
+# código e pesos da RAFT-Stereo (baixados por scripts/pcad/get_raft.sh)
+third_party/
