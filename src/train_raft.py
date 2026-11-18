@@ -171,7 +171,12 @@ def main():
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(opt); scaler.update(); sched.step()
+            scaler.step(opt); scaler.update()
+            # Se o treino foi retomado com outro tamanho de lote, o número de passos por época muda e o
+            # agendador (cujo total foi fixado no primeiro job) pode acabar antes: daí em diante a taxa
+            # de aprendizado fica no valor final, em vez de o treino cair.
+            if sched.last_epoch + 1 < sched.total_steps:
+                sched.step()
             run_loss += loss.item(); steps += 1
             if STOP:
                 break
