@@ -10,6 +10,7 @@ favorecer B, A também é reportado com uma reta ajustada por par sobre a própr
 
 Uso (notebook):
   .venv\\Scripts\\python -m src.evaluate --height runs\\unet_r34_local\\best.pt --stereo runs\\psmnet_local\\best.pt
+  --stereo sgm usa o baseline clássico (Semi-Global Matching, CPU, sem rede neural).
 Saídas em outputs/eval/: metrics.json, por_par.csv, figuras e previsões de alguns pares (.npz).
 """
 import argparse
@@ -82,7 +83,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--height", required=True, help="checkpoint do Caminho A (best.pt)")
     ap.add_argument("--stereo", required=True,
-                    help="Caminho B: best.pt da PSMNet ou da RAFT-Stereo, ou pesos .pth da RAFT-Stereo sem ajuste")
+                    help="Caminho B: best.pt da PSMNet ou da RAFT-Stereo, pesos .pth da RAFT-Stereo sem ajuste, "
+                         "ou 'sgm' (baseline clássico, sem aprendizado)")
     ap.add_argument("--raft-dir", default=None, help="repositório oficial da RAFT-Stereo (padrão: third_party/RAFT-Stereo)")
     ap.add_argument("--data", default="data/dfc2019/track2")
     ap.add_argument("--splits", default="outputs/inspect/splits.json")
@@ -101,9 +103,15 @@ def main():
     ck_a = torch.load(args.height, map_location=device, weights_only=False)
     model_a = smp.Unet(ck_a["args"]["encoder"], encoder_weights=None, in_channels=3, classes=1).to(device)
     model_a.load_state_dict(ck_a["model"]); model_a.eval()
-    ck_b = torch.load(args.stereo, map_location=device, weights_only=False)
-    is_raft = "model" not in ck_b or ck_b.get("args", {}).get("model") == "raft"
-    if is_raft:
+    is_sgm = args.stereo.lower() == "sgm"
+    ck_b = {} if is_sgm else torch.load(args.stereo, map_location=device, weights_only=False)
+    is_raft = not is_sgm and ("model" not in ck_b or ck_b.get("args", {}).get("model") == "raft")
+    if is_sgm:
+        from src.models.sgm import sgm_disparity
+        model_b = None
+        min_d, max_d = -64, 128                     # mesmos pixels avaliados nas redes
+        b_name, epoca_b = "B: 2 imagens (SGM clássico)", "sem treino"
+    elif is_raft:
         from src.models.raft import RaftDisparity
         iters = ck_b.get("args", {}).get("valid_iters", 32)   # mesmas iterações usadas na validação do treino
         model_b = RaftDisparity(args.raft_dir, mixed_precision=amp, valid_iters=iters).to(device)
@@ -118,7 +126,8 @@ def main():
         model_b = PSMNetBasic(max_d, min_d).to(device)
         model_b.load_state_dict(ck_b["model"])
         b_name, epoca_b = "B: 2 imagens (PSMNet)", ck_b["epoch"]
-    model_b.eval()
+    if model_b is not None:
+        model_b.eval()
     print(f"A: {args.height} (época {ck_a['epoch']}) | B: {args.stereo} (época {epoca_b})")
     mean_t = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
     std_t = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
@@ -136,6 +145,7 @@ def main():
     acc = {k: Acc() for k in metodos}
     acc_geo = {nome: {k: Acc() for k in metodos} for _, _, nome in GEOMETRIAS}
     epe = d1 = nd = 0.0
+    cobertura = []   # SGM: fração de pixels com resposta antes do preenchimento
     rows = []
     with torch.no_grad():
         for i in range(len(ds)):
@@ -146,7 +156,11 @@ def main():
                 continue
             with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
                 h_a = model_a(left[None].to(device)).float()[0, 0].cpu().numpy()
-            if is_raft:  # a RAFT-Stereo recebe as imagens em 0-255 e processa a imagem inteira de uma vez
+            if is_sgm:  # imagens de volta para uint8; roda na CPU
+                to_u8 = lambda x: ((x[None] * std_t + mean_t)[0] * 255).clamp(0, 255).round().byte().permute(1, 2, 0).numpy()
+                d_b, cov = sgm_disparity(to_u8(left), to_u8(right), min_d, max_d)
+                cobertura.append(cov)
+            elif is_raft:  # a RAFT-Stereo recebe as imagens em 0-255 e processa a imagem inteira de uma vez
                 raw_l = ((left[None] * std_t + mean_t) * 255).to(device)
                 raw_r = ((right[None] * std_t + mean_t) * 255).to(device)
                 d_b = model_b(raw_l, raw_r).float()[0, 0].cpu().numpy()
@@ -180,6 +194,8 @@ def main():
 
     res = {k: v.result() for k, v in acc.items()}
     res["B_disparidade"] = {"epe_px": float(epe / max(nd, 1)), "d1_3px": float(d1 / max(nd, 1))}
+    if cobertura:
+        res["B_disparidade"]["cobertura_sgm"] = float(np.mean(cobertura))
     res["pares_avaliados"] = len(rows)
     res["pixels_avaliados"] = int(acc["A"].n)
     (out / "metrics.json").write_text(json.dumps(res, indent=1))
@@ -194,6 +210,8 @@ def main():
     for k, name in names.items():
         r = res[k]; print(f"{name:28s} {r['mae_m']:8.2f} {r['rmse_m']:9.2f} {r['erro_menor_1m']:8.1%}")
     print(f"B em disparidade: EPE {res['B_disparidade']['epe_px']:.2f} px, D1 {res['B_disparidade']['d1_3px']:.1%}")
+    if cobertura:
+        print(f"SGM: {np.mean(cobertura):.1%} dos pixels com resposta antes do preenchimento")
 
     # Geometria do par: quantos metros de altura cada pixel de disparidade representa.
     # Par com ângulo pequeno entre as duas vistas = muitos metros por pixel = estéreo pouco preciso.
