@@ -1,6 +1,8 @@
 """Comparação visual A x B x verdade em pares do teste escolhidos por regra fixa (sem escolher a dedo).
 
-Regra de escolha, a partir do por_par.csv da avaliação com a RAFT (outputs/test_raft):
+Regra de escolha, a partir do por_par.csv da avaliação com a RAFT (outputs/test_raft).
+Só entram cenas com relevo (desvio-padrão da altura real >= 2 m): em cenas planas a reta
+de calibração por par torna B trivialmente perfeito, o que não mostra nada sobre o estéreo.
   tipico   - par de geometria boa com o RMSE da fusão final mais próximo da mediana
   ganho    - par de geometria boa em que a fusão mais reduz o RMSE em relação a A
   perda    - par de geometria boa em que a fusão mais aumenta o RMSE em relação a A
@@ -37,7 +39,29 @@ TXT = {
 }
 
 
-def escolher(csv_path):
+def _im(ax, img, **kw):
+    """imshow com reamostragem depois da conversão em cores: ao reduzir 1024 px para ~250 px,
+    a reamostragem dos dados espalhava os NaN esparsos (pixels sem verdade) pelo painel todo."""
+    return ax.imshow(img, interpolation="antialiased", interpolation_stage="rgba", **kw)
+
+
+def relevo_std(data_dir, par):
+    import tifffile
+    a = tifffile.imread(Path(data_dir) / f"{par}LEFT_AGL.tif").astype(np.float32)
+    a = a[np.isfinite(a) & (a > -998)]
+    return float(a.std()) if a.size else 0.0
+
+
+def primeiro_com_relevo(cands, data_dir, min_std):
+    for r in cands:
+        sd = relevo_std(data_dir, r["par"])
+        if sd >= min_std:
+            r["altura_std"] = sd
+            return r
+    return None
+
+
+def escolher(csv_path, data_dir, min_std=2.0):
     rows = list(csv.DictReader(open(csv_path, encoding="utf-8")))
     for r in rows:
         for k, v in r.items():
@@ -48,13 +72,14 @@ def escolher(csv_path):
     sel = {}
     if boa:
         med = np.median([r["AB_relevo_geo_rmse"] for r in boa])
-        sel["tipico"] = min(boa, key=lambda r: abs(r["AB_relevo_geo_rmse"] - med))
-        sel["ganho"] = max(boa, key=lambda r: r["A_rmse"] - r["AB_relevo_geo_rmse"])
-        sel["perda"] = min(boa, key=lambda r: r["A_rmse"] - r["AB_relevo_geo_rmse"])
+        ganho = lambda r: r["A_rmse"] - r["AB_relevo_geo_rmse"]
+        sel["tipico"] = primeiro_com_relevo(sorted(boa, key=lambda r: abs(r["AB_relevo_geo_rmse"] - med)), data_dir, min_std)
+        sel["ganho"] = primeiro_com_relevo(sorted(boa, key=ganho, reverse=True), data_dir, min_std)
+        sel["perda"] = primeiro_com_relevo(sorted(boa, key=ganho), data_dir, min_std)
     if ruim:
         med = np.median([r["B_rmse"] for r in ruim])
-        sel["ruim"] = min(ruim, key=lambda r: abs(r["B_rmse"] - med))
-    return sel
+        sel["ruim"] = primeiro_com_relevo(sorted(ruim, key=lambda r: abs(r["B_rmse"] - med)), data_dir, min_std)
+    return {k: v for k, v in sel.items() if v is not None}
 
 
 def main():
@@ -66,6 +91,7 @@ def main():
     ap.add_argument("--pairs", nargs="*", default=None, help="pares específicos (ignora a regra de escolha)")
     ap.add_argument("--data", default="data/dfc2019/track2")
     ap.add_argument("--out", default="outputs/visual")
+    ap.add_argument("--min-std", type=float, default=2.0, help="desvio-padrão mínimo da altura real (m)")
     ap.add_argument("--lang", default="pt", choices=["pt", "en"])
     args = ap.parse_args()
     T = TXT[args.lang]
@@ -93,7 +119,7 @@ def main():
     if args.pairs:
         sel = {f"par{i + 1}": {"par": p} for i, p in enumerate(args.pairs)}
     else:
-        sel = escolher(args.csv)
+        sel = escolher(args.csv, args.data, args.min_std)
     names = [s["par"] for s in sel.values()]
     ds = Track2Stereo(args.data, names, crop=None, train=False, augment=False)
     mean_t = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
@@ -118,6 +144,9 @@ def main():
         if cal is None:
             print(f"{par}: poucos pixels válidos, pulando"); continue
         m_px = float(abs(cal[0]))
+        dv = dmask[0].numpy() & av
+        fora = float(((disp < min_d) | (disp >= min_d + max_d))[dv].mean()) if dv.any() else 0.0
+        dmax = float(np.abs(disp[dv]).max()) if dv.any() else 0.0
         h_r = cal[0] * d_r + cal[1]
         h_s = cal[0] * d_s + cal[1]
         h_ab = combine(h_a, h_r, m_px)["AB_relevo_geo"]
@@ -133,29 +162,29 @@ def main():
         preds = [("A", h_a), ("sgm", h_s), ("raft", h_r), ("ab", h_ab)]
         rmse = {k: float(np.sqrt(((p[m] - agl[m]) ** 2).mean())) for k, p in preds}
         mae = {k: float(np.abs(p[m] - agl[m]).mean()) for k, p in preds}
-        resumo[rotulo] = {"par": par, "m_por_px": m_px, "linha_perfil": lin, "rmse_m": rmse, "mae_m": mae}
+        resumo[rotulo] = {"par": par, "m_por_px": m_px, "fora_intervalo": fora, "disp_max_abs_px": dmax, "linha_perfil": lin, "rmse_m": rmse, "mae_m": mae}
 
         fig = plt.figure(figsize=(20, 11))
         gs = fig.add_gridspec(3, 6, height_ratios=[1, 1, 0.75], hspace=0.28, wspace=0.08)
         cmap_h = plt.get_cmap("viridis").copy(); cmap_h.set_bad("0.6")
         cmap_e = plt.get_cmap("magma").copy(); cmap_e.set_bad("0.6")
-        ax = fig.add_subplot(gs[0, 0]); ax.imshow(rgb); ax.axhline(lin, color="w", lw=1, ls="--")
+        ax = fig.add_subplot(gs[0, 0]); _im(ax, rgb); ax.axhline(lin, color="w", lw=1, ls="--")
         ax.set_title(T["rgb"], fontsize=10); ax.axis("off")
-        ax = fig.add_subplot(gs[0, 1]); hh = ax.imshow(gt, cmap=cmap_h, vmin=0, vmax=vmax)
+        ax = fig.add_subplot(gs[0, 1]); hh = _im(ax, gt, cmap=cmap_h, vmin=0, vmax=vmax)
         ax.axhline(lin, color="w", lw=1, ls="--"); ax.set_title(T["gt"], fontsize=10); ax.axis("off")
         for j, (k, p) in enumerate(preds):
-            ax = fig.add_subplot(gs[0, 2 + j]); ax.imshow(p, cmap=cmap_h, vmin=0, vmax=vmax)
+            ax = fig.add_subplot(gs[0, 2 + j]); _im(ax, p, cmap=cmap_h, vmin=0, vmax=vmax)
             ax.set_title(f"{T[k]}\nRMSE {rmse[k]:.2f} m | MAE {mae[k]:.2f} m", fontsize=10); ax.axis("off")
         fig.colorbar(hh, ax=fig.axes[1:6], fraction=0.012, pad=0.01, label=T["h"])
         rgb_r = np.clip(right.numpy().transpose(1, 2, 0) * IMAGENET_STD + IMAGENET_MEAN, 0, 1)
-        ax = fig.add_subplot(gs[1, 0]); ax.imshow(rgb_r)
+        ax = fig.add_subplot(gs[1, 0]); _im(ax, rgb_r)
         ax.set_title(T["rgb_r"], fontsize=10); ax.axis("off")
-        ax = fig.add_subplot(gs[1, 1]); ax.imshow(np.where(m, 1.0, 0.35), cmap="gray", vmin=0, vmax=1)
+        ax = fig.add_subplot(gs[1, 1]); _im(ax, np.where(m, 1.0, 0.35), cmap="gray", vmin=0, vmax=1)
         ax.set_title(T["mask"], fontsize=10); ax.axis("off")
         eaxes = []
         for j, (k, p) in enumerate(preds):
             ax = fig.add_subplot(gs[1, 2 + j]); eaxes.append(ax)
-            he = ax.imshow(np.where(m, np.abs(p - agl), np.nan), cmap=cmap_e, vmin=0, vmax=5)
+            he = _im(ax, np.where(m, np.abs(p - agl), np.nan), cmap=cmap_e, vmin=0, vmax=5)
             ax.set_title(f"{T['err']}\n{T[k]}", fontsize=9); ax.axis("off")
         fig.colorbar(he, ax=eaxes, fraction=0.012, pad=0.01, label=f"{T['err']} (m)")
         ax = fig.add_subplot(gs[2, :])
@@ -166,7 +195,9 @@ def main():
         ax.set_xlim(0, xs[-1]); ax.set_ylim(min(-2, np.nanmin(gt[lin]) - 1), vmax * 1.25 + 1)
         ax.set_xlabel(T["x"]); ax.set_ylabel(T["h"]); ax.set_title(T["perfil"], fontsize=10)
         ax.legend(ncol=5, fontsize=9, loc="upper right"); ax.grid(alpha=0.3)
-        fig.suptitle(f"{T[rotulo] if rotulo in T else rotulo}: {par}  ({m_px:.2f} m/px)", fontsize=13)
+        extra = (f"{fora:.1%} da verdade fora de [{min_d}, {min_d + max_d}) px; |disp| máx {dmax:.0f} px" if args.lang == "pt"
+                 else f"{fora:.1%} of ground truth outside [{min_d}, {min_d + max_d}) px; max |disp| {dmax:.0f} px")
+        fig.suptitle(f"{T[rotulo] if rotulo in T else rotulo}: {par}  ({m_px:.2f} m/px; {extra})", fontsize=13)
         f = out / f"{rotulo}_{par.rstrip('_')}.png"
         fig.savefig(f, dpi=110, bbox_inches="tight"); plt.close(fig)
         print(f"{rotulo:7s} {par} | RMSE A {rmse['A']:.2f} SGM {rmse['sgm']:.2f} RAFT {rmse['raft']:.2f} "
