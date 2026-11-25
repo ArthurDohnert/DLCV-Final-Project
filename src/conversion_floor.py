@@ -25,30 +25,7 @@ import tifffile
 
 from src.data.dataset import load_split
 from src.evaluate import GEOMETRIAS
-
-
-def superficie_solo(d, chao, bloco=32):
-    """Mediana da disparidade do chão em blocos, buracos preenchidos pelos vizinhos, interpolada."""
-    import cv2
-    h, w = d.shape
-    gh, gw = h // bloco, w // bloco
-    g = np.full((gh, gw), np.nan)
-    for i in range(gh):
-        for j in range(gw):
-            sl = (slice(i * bloco, (i + 1) * bloco), slice(j * bloco, (j + 1) * bloco))
-            v = d[sl][chao[sl]]
-            if v.size >= 20:
-                g[i, j] = np.median(v)
-    if np.isnan(g).all():
-        return None
-    while np.isnan(g).any():                       # preenche com a média dos vizinhos válidos
-        p = np.pad(g, 1, constant_values=np.nan)
-        viz = np.stack([p[:-2, 1:-1], p[2:, 1:-1], p[1:-1, :-2], p[1:-1, 2:]])
-        cnt = np.isfinite(viz).sum(0)
-        media = np.where(cnt > 0, np.nansum(viz, 0) / np.maximum(cnt, 1), np.nan)
-        g = np.where(np.isnan(g), media, g)
-    g = cv2.GaussianBlur(g.astype(np.float32), (3, 3), 0)
-    return cv2.resize(g, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float64)
+from src.terrain import superficie_solo
 
 
 def valido(a):

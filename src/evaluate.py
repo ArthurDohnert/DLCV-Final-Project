@@ -11,6 +11,9 @@ favorecer B, A também é reportado com uma reta ajustada por par sobre a própr
 Uso (notebook):
   .venv\\Scripts\\python -m src.evaluate --height runs\\unet_r34_local\\best.pt --stereo runs\\psmnet_local\\best.pt
   --stereo sgm usa o baseline clássico (Semi-Global Matching, CPU, sem rede neural).
+  --solo acrescenta a análise post hoc "B relativo ao chão de A": a U-Net marca o chão (A < 1 m),
+  uma superfície suave do terreno é ajustada à disparidade prevista nesses pixels e subtraída
+  antes da conversão para metros (o estéreo mede terreno + objetos; o alvo é altura acima do solo).
 Saídas em outputs/eval/: metrics.json, por_par.csv, figuras e previsões de alguns pares (.npz).
 """
 import argparse
@@ -90,6 +93,10 @@ def main():
     ap.add_argument("--splits", default="outputs/inspect/splits.json")
     ap.add_argument("--split", default="val")
     ap.add_argument("--out", default="outputs/eval")
+    ap.add_argument("--solo", action="store_true",
+                    help="análise post hoc: converte B relativo ao terreno estimado nos pixels de chão de A")
+    ap.add_argument("--solo-cobertura", type=float, default=0.25,
+                    help="fração mínima de blocos 32x32 com chão; abaixo disso B fica com a reta original")
     ap.add_argument("--save-preds", type=int, default=5, help="quantos pares salvar em .npz e nas figuras")
     args = ap.parse_args()
 
@@ -142,6 +149,10 @@ def main():
         tot += a_[m_].sum().item(); cnt += m_.sum().item()
     mean_agl = tot / max(cnt, 1)
     metodos = ["media", "A", "A_ajuste", "B", "AB_media", "AB_relevo", "AB_relevo_geo"]
+    if args.solo:
+        from src.terrain import superficie_solo
+        metodos += ["B_solo", "AB_relevo_solo", "AB_relevo_geo_solo"]
+    solo_usado = solo_recuo = 0
     acc = {k: Acc() for k in metodos}
     acc_geo = {nome: {k: Acc() for k in metodos} for _, _, nome in GEOMETRIAS}
     epe = d1 = nd = 0.0
@@ -178,6 +189,21 @@ def main():
             comb = combine(h_a, h_b, m_px)
             preds = {"media": np.full_like(gt, mean_agl), "A": h_a[m], "A_ajuste": h_a2[m], "B": h_b[m]}
             preds.update({k: v[m] for k, v in comb.items()})
+            if args.solo:
+                # chão segundo A; superfície do terreno na disparidade PREVISTA (nenhuma verdade aqui)
+                chao = h_a < 1.0
+                sup_b = superficie_solo(d_b.astype(np.float64), chao, min_cobertura=args.solo_cobertura)
+                # calibração por par, como na avaliação oficial: verdade de disparidade e de altura,
+                # com o terreno da verdade estimado da mesma forma (mesma máscara de chão de A)
+                sup_g = superficie_solo(np.where(m, disp, 0.0), chao & m, min_cobertura=args.solo_cobertura)
+                cal_s = None if sup_b is None or sup_g is None else fit_line(disp[m] - sup_g[m], agl[m])
+                if cal_s is None:
+                    h_bs = h_b; solo_recuo += 1           # pouco chão visível: mantém a reta original
+                else:
+                    h_bs = cal_s[0] * (d_b - sup_b) + cal_s[1]; solo_usado += 1
+                comb_s = combine(h_a, h_bs, m_px)
+                preds.update({"B_solo": h_bs[m], "AB_relevo_solo": comb_s["AB_relevo"][m],
+                              "AB_relevo_geo_solo": comb_s["AB_relevo_geo"][m]})
             row = {"par": pairs[i], "geometria": geo}
             for k, pred in preds.items():
                 err = pred - gt
@@ -197,6 +223,9 @@ def main():
     if cobertura:
         res["B_disparidade"]["cobertura_sgm"] = float(np.mean(cobertura))
     res["pares_avaliados"] = len(rows)
+    if args.solo:
+        res["solo"] = {"pares_corrigidos": solo_usado, "pares_com_reta_original": solo_recuo,
+                       "cobertura_minima": args.solo_cobertura}
     res["pixels_avaliados"] = int(acc["A"].n)
     (out / "metrics.json").write_text(json.dumps(res, indent=1))
     with open(out / "por_par.csv", "w", newline="") as f:
@@ -206,10 +235,16 @@ def main():
     names = {"media": "Baseline (altura média)", "A": "A: 1 imagem (U-Net)", "A_ajuste": "A + ajuste por par",
              "B": b_name, "AB_media": "A+B: média",
              "AB_relevo": "A+B: por relevo", "AB_relevo_geo": "A+B: relevo + geometria"}
+    if args.solo:
+        names.update({"B_solo": "B rel. ao chão de A*", "AB_relevo_solo": "A+B: relevo, chão de A*",
+                      "AB_relevo_geo_solo": "A+B: rel.+geo, chão de A*"})
     print(f"{'método':28s} {'MAE (m)':>8s} {'RMSE (m)':>9s} {'erro<1m':>8s}")
     for k, name in names.items():
         r = res[k]; print(f"{name:28s} {r['mae_m']:8.2f} {r['rmse_m']:9.2f} {r['erro_menor_1m']:8.1%}")
     print(f"B em disparidade: EPE {res['B_disparidade']['epe_px']:.2f} px, D1 {res['B_disparidade']['d1_3px']:.1%}")
+    if args.solo:
+        print(f"* análise post hoc: {solo_usado} pares corrigidos pelo terreno, "
+              f"{solo_recuo} com pouco chão visível (mantida a reta original)")
     if cobertura:
         print(f"SGM: {np.mean(cobertura):.1%} dos pixels com resposta antes do preenchimento")
 
@@ -223,7 +258,8 @@ def main():
             continue
         res["por_geometria"][nome] = {"pares": len(sel)}
         print(f"  {nome} ({len(sel)} pares)")
-        for k in ["A", "B", "AB_media", "AB_relevo", "AB_relevo_geo"]:
+        for k in ["A", "B", "AB_media", "AB_relevo", "AB_relevo_geo"] + (
+                ["B_solo", "AB_relevo_solo", "AB_relevo_geo_solo"] if args.solo else []):
             r = acc_geo[nome][k].result()
             vence = sum(x[f"{k}_rmse"] < x["A_rmse"] for x in sel)
             res["por_geometria"][nome][k] = dict(r, vence_A=vence)
