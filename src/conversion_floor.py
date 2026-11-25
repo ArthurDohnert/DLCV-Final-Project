@@ -4,6 +4,9 @@ Aplica a calibração por par à disparidade VERDADEIRA e mede o erro contra a a
 É o erro que sobraria em B mesmo com um estéreo perfeito.
   reta:  altura = a*disp + b                  (calibração usada na avaliação oficial)
   plano: altura = a*disp + b + c*x + e*y      (reta + inclinação do terreno; análise post hoc)
+  solo:  altura = a*(disp - solo(x, y)) + b   (solo = superfície suave da disparidade nos pixels
+         de chão, de qualquer forma; aqui o chão vem da verdade, então é um oráculo: diz quanto
+         um bom modelo de terreno resolveria. Na prática o chão viria da U-Net, pixels com A < 1 m)
 A disparidade mede a altura absoluta (terreno + objetos); a altura do dataset é acima do solo.
 Em terreno inclinado, a reta não separa uma coisa da outra.
 
@@ -22,6 +25,30 @@ import tifffile
 
 from src.data.dataset import load_split
 from src.evaluate import GEOMETRIAS
+
+
+def superficie_solo(d, chao, bloco=32):
+    """Mediana da disparidade do chão em blocos, buracos preenchidos pelos vizinhos, interpolada."""
+    import cv2
+    h, w = d.shape
+    gh, gw = h // bloco, w // bloco
+    g = np.full((gh, gw), np.nan)
+    for i in range(gh):
+        for j in range(gw):
+            sl = (slice(i * bloco, (i + 1) * bloco), slice(j * bloco, (j + 1) * bloco))
+            v = d[sl][chao[sl]]
+            if v.size >= 20:
+                g[i, j] = np.median(v)
+    if np.isnan(g).all():
+        return None
+    while np.isnan(g).any():                       # preenche com a média dos vizinhos válidos
+        p = np.pad(g, 1, constant_values=np.nan)
+        viz = np.stack([p[:-2, 1:-1], p[2:, 1:-1], p[1:-1, :-2], p[1:-1, 2:]])
+        cnt = np.isfinite(viz).sum(0)
+        media = np.where(cnt > 0, np.nansum(viz, 0) / np.maximum(cnt, 1), np.nan)
+        g = np.where(np.isnan(g), media, g)
+    g = cv2.GaussianBlur(g.astype(np.float32), (3, 3), 0)
+    return cv2.resize(g, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float64)
 
 
 def valido(a):
@@ -43,8 +70,9 @@ def main():
         for r in csv.DictReader(open(args.csv_raft, encoding="utf-8")):
             b_real[r["par"]] = float(r["B_rmse"])
 
-    tot = {k: [0.0, 0.0, 0] for k in ("reta", "plano")}           # soma |e|, soma e², n
-    geo = {g: {k: [0.0, 0.0, 0] for k in ("reta", "plano")} for _, _, g in GEOMETRIAS}
+    MET = ("reta", "plano", "solo")
+    tot = {k: [0.0, 0.0, 0] for k in MET}           # soma |e|, soma e², n
+    geo = {g: {k: [0.0, 0.0, 0] for k in MET} for _, _, g in GEOMETRIAS}
     rows = []
     for i, par in enumerate(load_split(args.splits, args.split)):
         d = tifffile.imread(data / f"{par}LEFT_DSP.tif").astype(np.float64)
@@ -62,14 +90,22 @@ def main():
         c1, *_ = np.linalg.lstsq(X1, hv, rcond=None)
         c2, *_ = np.linalg.lstsq(X2, hv, rcond=None)
         e1, e2 = X1 @ c1 - hv, X2 @ c2 - hv
+        sup = superficie_solo(np.where(m, d, 0.0), m & (h < 0.5))
+        if sup is None:
+            e3 = e1
+        else:
+            X3 = np.stack([dv - sup[m], np.ones_like(dv)], 1)
+            c3, *_ = np.linalg.lstsq(X3, hv, rcond=None)
+            e3 = X3 @ c3 - hv
         m_px = abs(c1[0])
         g = next(nome for lo, hi, nome in GEOMETRIAS if lo <= m_px < hi)
-        for k, e in (("reta", e1), ("plano", e2)):
+        for k, e in (("reta", e1), ("plano", e2), ("solo", e3)):
             for acc in (tot[k], geo[g][k]):
                 acc[0] += np.abs(e).sum(); acc[1] += (e ** 2).sum(); acc[2] += e.size
         row = {"par": par, "geometria": g, "m_por_px": m_px, "m_por_px_plano": abs(c2[0]),
                "inclinacao_m_por_tile": float(math.hypot(c2[2], c2[3])),
-               "piso_reta_rmse": float(np.sqrt((e1 ** 2).mean())), "piso_plano_rmse": float(np.sqrt((e2 ** 2).mean()))}
+               "piso_reta_rmse": float(np.sqrt((e1 ** 2).mean())), "piso_plano_rmse": float(np.sqrt((e2 ** 2).mean())),
+               "piso_solo_rmse": float(np.sqrt((e3 ** 2).mean()))}
         if par in b_real:
             row["B_raft_rmse"] = b_real[par]
         rows.append(row)
@@ -88,21 +124,21 @@ def main():
 
     print(f"\nPiso da conversão com a disparidade VERDADEIRA ({len(rows)} pares, split {args.split}):")
     print(f"{'':22s} {'MAE (m)':>8s} {'RMSE (m)':>9s}")
-    for k in ("reta", "plano"):
+    for k in MET:
         r = resumo["geral"][k]; print(f"{k:22s} {r['mae_m']:8.2f} {r['rmse_m']:9.2f}")
     for g, d in resumo["por_geometria"].items():
-        print(f"  {g} ({d['pares']} pares): reta RMSE {d['reta']['rmse_m']:.2f} | plano RMSE {d['plano']['rmse_m']:.2f}")
+        print(f"  {g} ({d['pares']} pares): reta RMSE {d['reta']['rmse_m']:.2f} | plano RMSE {d['plano']['rmse_m']:.2f} | solo RMSE {d['solo']['rmse_m']:.2f}")
     pior = sorted(rows, key=lambda r: -r["piso_reta_rmse"])[:8]
     print("\nPares com maior piso (reta):")
     for r in pior:
         extra = f" | B real {r['B_raft_rmse']:.2f}" if "B_raft_rmse" in r else ""
         print(f"  {r['par']} reta {r['piso_reta_rmse']:.2f} m, plano {r['piso_plano_rmse']:.2f} m, "
-              f"inclinação {r['inclinacao_m_por_tile']:.1f} m/tile{extra}")
+              f"solo {r['piso_solo_rmse']:.2f} m, inclinação {r['inclinacao_m_por_tile']:.1f} m/tile{extra}")
     for p in ("OMA276_023_025_", "OMA172_027_019_", "JAX_260_006_011_"):
         r = next((x for x in rows if x["par"] == p), None)
         if r:
             extra = f" | B real {r['B_raft_rmse']:.2f}" if "B_raft_rmse" in r else ""
-            print(f"  [{p}] reta {r['piso_reta_rmse']:.2f} m, plano {r['piso_plano_rmse']:.2f} m{extra}")
+            print(f"  [{p}] reta {r['piso_reta_rmse']:.2f} m, plano {r['piso_plano_rmse']:.2f} m, solo {r['piso_solo_rmse']:.2f} m{extra}")
 
 
 if __name__ == "__main__":
